@@ -1,6 +1,7 @@
 // =============================================================
 // NOG - COBBLEMON DAYCARE LIBRARY
 // =============================================================
+// Hello, world! (Codex edit test)
 
 // Create root namespace if it does not exist.
 global.Nog = global.Nog || {};
@@ -14,9 +15,6 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
 
 const $Component = Java.loadClass("net.minecraft.network.chat.Component");
 const $LevelUpEvolution = Java.loadClass(
-  "com.cobblemon.mod.common.pokemon.evolution.variants.LevelUpEvolution",
-);
-Java.loadClass(
   "com.cobblemon.mod.common.pokemon.evolution.variants.LevelUpEvolution",
 );
 

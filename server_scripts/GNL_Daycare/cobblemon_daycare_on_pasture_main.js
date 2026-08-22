@@ -19,7 +19,6 @@
   // =============================================================
 
   const DaycareLib = global.Nog.CobblemonDaycare;
-
   const Helpers = global.Nog.Helpers;
 
   // =============================================================
@@ -91,32 +90,16 @@
   // LOCAL LOGGING WRAPPERS
   // =============================================================
 
-  function Debug(message) {
-    if (!DEBUG) {
-      return;
-    }
+  if (global.Nog == null || global.Nog.CobblemonDaycare == null) {
+    console.error("[Cobblemon Daycare] Daycare library was not loaded.");
 
-    if (Helpers != null && typeof Helpers.Debug === "function") {
-      Helpers.Debug(DEBUG, LOG_TAG, message);
-
-      return;
-    }
-
-    console.info("[" + LOG_TAG + "] " + message);
+    return;
   }
 
-  function LogError(context, error) {
-    if (Helpers != null && typeof Helpers.LogError === "function") {
-      Helpers.LogError(LOG_TAG, context, error);
+  if (global.Nog.Helpers == null) {
+    console.error("[Cobblemon Daycare] Helpers library was not loaded.");
 
-      return;
-    }
-
-    console.error("[" + LOG_TAG + "] ERROR");
-
-    console.error("[" + LOG_TAG + "] Context: " + context);
-
-    console.error("[" + LOG_TAG + "] Error: " + String(error));
+    return;
   }
 
   // =============================================================
@@ -125,7 +108,7 @@
 
   function WakeDaycare(reason) {
     if (daycareAwake) {
-      Debug("Daycare is already awake");
+      Helpers.Debug(DEBUG, LOG_TAG, "Daycare is already awake");
       return;
     }
 
@@ -135,7 +118,7 @@
 
     emptyScanStreak = 0;
 
-    Debug("Waking daycare: " + reason);
+    Helpers.Debug(DEBUG, LOG_TAG, "Waking daycare: " + reason);
   }
 
   function SleepDaycare() {
@@ -145,7 +128,11 @@
 
     emptyScanStreak = 0;
 
-    Debug("No loaded daycare Pokemon remain. " + "Scanning is dormant.");
+    Helpers.Debug(
+      DEBUG,
+      LOG_TAG,
+      "No loaded daycare Pokemon remain. " + "Scanning is dormant.",
+    );
   }
 
   // =============================================================
@@ -281,7 +268,9 @@
     if (currentTick < lastTick) {
       session.lastTick = currentTick;
 
-      Debug(
+      Helpers.Debug(
+        DEBUG,
+        LOG_TAG,
         DaycareLib.GetPokemonName(pokemon) +
           ": game time moved backwards. " +
           "Session clock reset.",
@@ -349,7 +338,9 @@
     // -------------------------------------------------------------
 
     if (oldExperience === newExperience && oldLevel === newLevel) {
-      Debug(
+      Helpers.Debug(
+        DEBUG,
+        LOG_TAG,
         DaycareLib.GetPokemonName(pokemon) + ": XP award produced no change.",
       );
 
@@ -374,7 +365,11 @@
 
     lastAwardTick = currentTick;
 
-    Debug(lastAwardPokemon + " received " + acceptedXp + " XP.");
+    Helpers.Debug(
+      DEBUG,
+      LOG_TAG,
+      lastAwardPokemon + " received " + acceptedXp + " XP.",
+    );
 
     // -------------------------------------------------------------
     // LEVEL-UP
@@ -414,7 +409,8 @@
       try {
         ProcessDaycarePokemon(entry.pokemon, entry.level);
       } catch (error) {
-        LogError(
+        Helpers.LogError(
+          LOG_TAG,
           "processing Pokemon " + DaycareLib.GetSafePokemonUuid(entry.pokemon),
           error,
         );
@@ -439,7 +435,11 @@
 
         session.awayDisplayXp = 0;
 
-        Debug(session.pokemonName + " is no longer loaded.");
+        Helpers.Debug(
+          DEBUG,
+          LOG_TAG,
+          session.pokemonName + " is no longer loaded.",
+        );
       }
     });
 
@@ -450,7 +450,9 @@
     if (activeDaycarePokemon === 0) {
       emptyScanStreak++;
 
-      Debug(
+      Helpers.Debug(
+        DEBUG,
+        LOG_TAG,
         "Empty daycare scan " +
           emptyScanStreak +
           "/" +
@@ -491,7 +493,7 @@
     try {
       RunDaycareScan(event.server);
     } catch (error) {
-      LogError("main daycare scan", error);
+      Helpers.LogError(LOG_TAG, "main daycare scan", error);
     }
   }
 
@@ -523,7 +525,7 @@
 
       WakeDaycare("a tethered Pokemon loaded");
     } catch (error) {
-      LogError("checking spawned Pokemon", error);
+      Helpers.LogError(LOG_TAG, "checking spawned Pokemon", error);
     }
   }
 
@@ -734,7 +736,7 @@
           " seconds to compare XP.",
       );
     } catch (error) {
-      LogError("/daycarexp command", error);
+      Helpers.LogError(LOG_TAG, "/daycarexp command", error);
     }
   }
 
@@ -801,5 +803,4 @@
       INTERVAL_TICKS / 20 +
       " seconds.",
   );
-  WakeDaycare("Wakey wakey eggs and bakey");
 })();

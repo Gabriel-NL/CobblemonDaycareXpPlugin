@@ -12,12 +12,8 @@ global.Nog.Helpers = global.Nog.Helpers || {};
 // FUNCTIONS
 // =============================================================
 
-function HelloWorld() {
-  console.info("[Nog.Helpers] Hello World!");
-}
-
-function debug(DEBUG, TAG, message) {
-  if (!DEBUG) {
+function Debug(DEBUG_param, TAG, message) {
+  if (!DEBUG_param) {
     return;
   }
 
@@ -63,6 +59,5 @@ function LogError(tag, context, error) {
 // LIBRARY EXPORTS
 // =============================================================
 
-global.Nog.Helpers.HelloWorld = HelloWorld;
-global.Nog.Helpers.debug = debug;
+global.Nog.Helpers.Debug = Debug;
 global.Nog.Helpers.LogError = LogError;
