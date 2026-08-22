@@ -1,0 +1,3 @@
+mklink /J "D:\ProgramsToInstall\SavedInstallations\CurseForge\Instances\All the Mons - ATMons (1)\kubejs\server_scripts\GNL_Daycare" "D:\RepoMinecraft\CobblemonDaycareXpPlugin\server_scripts\GNL_Daycare"
+
+mklink /J "D:\ProgramsToInstall\SavedInstallations\CurseForge\Instances\All the Mons - ATMons (1)\kubejs\startup_scripts\GNL_Daycare" "D:\RepoMinecraft\CobblemonDaycareXpPlugin\startup_scripts\GNL_Daycare"
