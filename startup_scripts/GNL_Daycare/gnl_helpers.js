@@ -1,4 +1,4 @@
-// =============================================================
+/* // =============================================================
 // GNL - GENERIC HELPERS LIBRARY
 // =============================================================
 
@@ -45,19 +45,12 @@ function LogError(tag, context, error) {
 
   console.error("============================================================");
 }
-/*
-    usage sample:
 
-    Helpers.LogError(
-    LOG_TAG,
-    'main daycare scan',
-    error
-)
-    */
-
-// =============================================================
-// LIBRARY EXPORTS
-// =============================================================
+function SecondsToTicks(seconds) {
+  return Math.floor(Number(seconds) * 20);
+}
 
 global.Nog.Helpers.Debug = Debug;
 global.Nog.Helpers.LogError = LogError;
+global.Nog.Helpers.SecondsToTicks = SecondsToTicks;
+ */

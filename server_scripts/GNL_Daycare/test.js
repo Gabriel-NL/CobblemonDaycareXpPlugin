@@ -1,0 +1,582 @@
+// Load Minecraft's text-component class so the command can create a chat message.
+const $Component = Java.loadClass("net.minecraft.network.chat.Component");
+
+// Load Brigadier's boolean argument type for true/false command input.
+const $BoolArgumentType = Java.loadClass(
+  "com.mojang.brigadier.arguments.BoolArgumentType",
+);
+
+// Load Cobblemon's main API entry point so UUIDs can be resolved through PC storage.
+const $TestCobblemonApi = Java.loadClass("com.cobblemon.mod.common.Cobblemon");
+
+// Load the silent sidemod XP source type for the future XP application step.
+const $SidemodExperienceSource = Java.loadClass(
+  "com.cobblemon.mod.common.api.pokemon.experience.SidemodExperienceSource",
+);
+
+// Create the future daycare XP source without applying any XP yet.
+const TEST_DAYCARE_XP_SOURCE = new $SidemodExperienceSource("nog_daycare_test");
+
+// Store how many server ticks have passed since the previous position sample.
+let positionSampleTickCounter = 0;
+
+// Store the previous sampled position for each online player.
+let lastPositions = new Map();
+
+// Store the newest sampled position for each online player.
+let currentPositions = new Map();
+
+// Store pastured Pokemon UUIDs, grouped by their owner's UUID.
+let pasturedPokemonIdsByPlayer = new Map();
+
+// Store one PC-change subscription for each online player.
+let pcChangeSubscriptions = new Map();
+
+// Get every PC store associated with one player.
+function GetPlayerPcStores(player) {
+  // Ask Cobblemon for all PC stores belonging to this player's UUID.
+  let stores = $TestCobblemonApi.INSTANCE
+    .getStorage()
+    .getPCs(player.uuid, player.registryAccess())
+    .iterator();
+
+  // Create a normal JavaScript array for repeated use.
+  let playerPcStores = [];
+
+  // Copy only the PC store references into the local array.
+  while (stores.hasNext()) {
+    playerPcStores.push(stores.next());
+  }
+
+  // Return the existing stores without recreating their Pokemon.
+  return playerPcStores;
+}
+
+// Resolve one Pokemon UUID by checking all PC stores associated with a player.
+function FindPokemonInPlayerPcStores(player, pokemonUuid) {
+  // Get all PC stores currently associated with this player.
+  let playerPcStores = GetPlayerPcStores(player);
+
+  // Check each PC store until the UUID is found.
+  for (let index = 0; index < playerPcStores.length; index++) {
+    // Resolve the UUID inside the current PC store.
+    let pokemon = playerPcStores[index].get(pokemonUuid);
+
+    // Return the existing Pokemon object as soon as it is found.
+    if (pokemon != null) {
+      return pokemon;
+    }
+  }
+
+  // Report that no associated PC contains this UUID.
+  return null;
+}
+
+// Rebuild one player's local UUID list from only that player's PC storage.
+function RefreshPasturedPokemonIdsForPlayer(player) {
+  // Use this player's UUID string as their individual list key.
+  let playerKey = String(player.uuid);
+
+  // Create a replacement list so removed tether IDs disappear locally.
+  let playerPokemonIds = [];
+
+  // Get every PC store associated with this player.
+  let playerPcStores = GetPlayerPcStores(player);
+
+  // Visit each of this player's PC stores.
+  for (let storeIndex = 0; storeIndex < playerPcStores.length; storeIndex++) {
+    // Get an iterator containing every Pokemon in the current PC store.
+    let storedPokemon = playerPcStores[storeIndex].iterator();
+
+    // Visit every Pokemon in this PC store.
+    while (storedPokemon.hasNext()) {
+      // Get the next current Pokemon object from PC storage.
+      let pokemon = storedPokemon.next();
+
+      // Ignore Pokemon that are not currently tethered to a Pasture.
+      if (pokemon.getTetheringId() == null) {
+        continue;
+      }
+
+      // Store only the stable Pokemon UUID in the local list.
+      playerPokemonIds.push(pokemon.getUuid());
+    }
+  }
+
+  // Replace only this player's local list; this never modifies their PC.
+  pasturedPokemonIdsByPlayer.set(playerKey, playerPokemonIds);
+}
+
+// Stop listening for changes to one player's PC.
+function UnsubscribeFromPlayerPc(playerKey) {
+  // Get the existing subscription for this player.
+  let subscription = pcChangeSubscriptions.get(playerKey);
+
+  // Stop when this player has no active subscription.
+  if (subscription == null) {
+    return;
+  }
+
+  // Detach every callback registered for this player's PC stores.
+  for (let index = 0; index < subscription.length; index++) {
+    subscription[index].unsubscribe();
+  }
+
+  // Remove the inactive subscription from the local map.
+  pcChangeSubscriptions.delete(playerKey);
+}
+
+// Initialize one player's list and listen for future PC changes.
+function SubscribeToPlayerPc(player) {
+  // Use this player's UUID string as the subscription key.
+  let playerKey = String(player.uuid);
+
+  // Prevent duplicate callbacks for the same player.
+  UnsubscribeFromPlayerPc(playerKey);
+
+  // Build this player's initial local list once.
+  RefreshPasturedPokemonIdsForPlayer(player);
+
+  // Get every PC store associated with this player.
+  let playerPcStores = GetPlayerPcStores(player);
+
+  // Store all subscriptions belonging to this player.
+  let subscriptions = [];
+
+  // Subscribe separately to each associated PC store.
+  for (let index = 0; index < playerPcStores.length; index++) {
+    // Get the current PC store's change observable.
+    let observable = playerPcStores[index].getPcChangeObservable();
+
+    // Refresh only this player's list when this specific PC changes.
+    let subscription = observable.subscribe(function () {
+      RefreshPasturedPokemonIdsForPlayer(player);
+    });
+
+    // Retain this subscription for logout and shutdown cleanup.
+    subscriptions.push(subscription);
+  }
+
+  // Retain all of this player's subscriptions under their UUID.
+  pcChangeSubscriptions.set(playerKey, subscriptions);
+}
+
+// Run the enclosed function once for every server tick.
+ServerEvents.tick(function (event) {
+  // Add the current tick to the counter.
+  positionSampleTickCounter++;
+
+  // Minecraft normally runs at 20 ticks per second.
+  // 40 ticks = 2 seconds.
+  // Stop this tick handler until the counter reaches 40.
+  if (positionSampleTickCounter < 40) {
+    // Exit without sending a message yet.
+    return;
+  }
+
+  // Reset the counter so the next message occurs after another 40 ticks.
+  positionSampleTickCounter = 0;
+
+  // Stop position tracking and messages while the walking debugger is inactive.
+  if (!GetSavedDebuggerValue(event.server, "walk")) {
+    // Remove old samples so re-enabling starts from a fresh position.
+    lastPositions.clear();
+
+    // Remove the newest samples for the same reason.
+    currentPositions.clear();
+
+    // Exit without displaying any walking message.
+    return;
+  }
+
+  // Get an iterator containing every player currently online.
+  let players = event.server.getPlayerList().getPlayers().iterator();
+
+  // Sample and display the distance separately for every online player.
+  while (players.hasNext()) {
+    // Get the next online player.
+    let player = players.next();
+
+    // Use the player's UUID string as the key in both position maps.
+    let playerKey = String(player.uuid);
+
+    // Store the player's current horizontal coordinates.
+    let currentPosition = {
+      x: Number(player.getX()),
+      z: Number(player.getZ()),
+    };
+
+    // Save the newest position in the current-position map.
+    currentPositions.set(playerKey, currentPosition);
+
+    // Read the position recorded during the previous sample.
+    let lastPosition = lastPositions.get(playerKey);
+
+    // Start with zero distance when no previous sample exists.
+    let distance = 0;
+
+    // Calculate horizontal Euclidean distance after the first sample.
+    if (lastPosition != null) {
+      // Calculate the change on the X axis.
+      let deltaX = currentPosition.x - lastPosition.x;
+
+      // Calculate the change on the Z axis.
+      let deltaZ = currentPosition.z - lastPosition.z;
+
+      // Calculate the straight-line horizontal distance between both samples.
+      distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+    }
+
+    // Format the distance with one decimal place and a decimal comma.
+    let formattedDistance = distance.toFixed(1).replace(".", ",");
+
+    // Display only this player's distance since their previous sample.
+    player.sendSystemMessage(
+      $Component.literal("Distance since last position: " + formattedDistance),
+    );
+
+    // Move the current position into the last-position map for the next sample.
+    lastPositions.set(playerKey, currentPosition);
+  }
+});
+
+// Build the initial Pasture reference lists when the server finishes loading.
+ServerEvents.loaded(function (event) {
+  // Get every player already online when the server-loaded event runs.
+  let players = event.server.getPlayerList().getPlayers().iterator();
+
+  // Initialize and subscribe each currently online player separately.
+  while (players.hasNext()) {
+    SubscribeToPlayerPc(players.next());
+  }
+});
+
+// Initialize the temporary UUID lists when a player joins the running server.
+PlayerEvents.loggedIn(function (event) {
+  // Initialize this player's list and subscribe only to this player's PC.
+  SubscribeToPlayerPc(event.player);
+});
+
+// Remove the PC listener when a player leaves the server.
+PlayerEvents.loggedOut(function (event) {
+  // Stop listening to the departing player's PC changes.
+  UnsubscribeFromPlayerPc(String(event.player.uuid));
+});
+
+// Explicitly discard all temporary references when the server stops.
+ServerEvents.unloaded(function () {
+  // Unsubscribe every remaining PC listener before discarding local state.
+  pcChangeSubscriptions.forEach(function (subscriptions) {
+    for (let index = 0; index < subscriptions.length; index++) {
+      subscriptions[index].unsubscribe();
+    }
+  });
+
+  // Clear all retained subscription references.
+  pcChangeSubscriptions.clear();
+
+  // Clear the per-player Pasture lists.
+  pasturedPokemonIdsByPlayer.clear();
+});
+
+/*
+Separator, do not edit this
+
+
+
+
+*/
+
+// Define every available debugger and its default boolean value.
+const DEBUGGERS = {
+  // Control walking-related debug output.
+  walk: false,
+  // Control level-gained debug output.
+  level_gained: false,
+};
+
+// Create the persistent-data key belonging to a debugger name.
+function GetDebuggerPersistentKey(debuggerName) {
+  // Prefix the dictionary key to avoid collisions with unrelated saved data.
+  return "nogDaycareDebugger_" + debuggerName;
+}
+
+// Read a saved debugger value, creating a false default when it is missing.
+function GetSavedDebuggerValue(server, debuggerName) {
+  // Read the server's persistent data container.
+  let savedData = server.persistentData;
+
+  // Create the full persistent-data key for this dictionary entry.
+  let persistentKey = GetDebuggerPersistentKey(debuggerName);
+
+  // Create the value the first time this debugger is accessed.
+  if (!savedData.contains(persistentKey)) {
+    // Save the default value declared in the debugger dictionary.
+    savedData.putBoolean(persistentKey, DEBUGGERS[debuggerName]);
+  }
+
+  // Read the stored boolean value.
+  let enabled = savedData.getBoolean(persistentKey);
+
+  // Keep the in-memory dictionary synchronized with persistent data.
+  DEBUGGERS[debuggerName] = enabled;
+
+  // Return the synchronized dictionary value.
+  return DEBUGGERS[debuggerName];
+}
+
+// Save a debugger value in the server's persistent data.
+function SetSavedDebuggerValue(server, debuggerName, enabled) {
+  // Create the full persistent-data key for this dictionary entry.
+  let persistentKey = GetDebuggerPersistentKey(debuggerName);
+
+  // Save only a true or false value.
+  server.persistentData.putBoolean(persistentKey, Boolean(enabled));
+
+  // Update the in-memory dictionary immediately as well.
+  DEBUGGERS[debuggerName] = Boolean(enabled);
+}
+
+// Convert a boolean into a readable status word.
+function GetDebuggerStatusText(enabled) {
+  // Display active for true and inactive for false.
+  return enabled ? "active (true)" : "inactive (false)";
+}
+
+// Run the behavior belonging to /daycarexp test.
+function RunDaycareTestCommand(context) {
+  // Get the player who executed the command.
+  let player = context.source.player;
+
+  // Stop if the command was executed somewhere without a player.
+  if (player == null) {
+    return 0;
+  }
+
+  // Send the message only to the player who executed the command.
+  player.sendSystemMessage($Component.literal("Hi! This is my script!"));
+
+  // Tell Minecraft that the command completed successfully.
+  return 1;
+}
+
+// Get a readable name from an existing Pokemon reference.
+function GetPasturedPokemonName(pokemon) {
+  // Try to use the Pokemon's normal display name first.
+  try {
+    return pokemon.getDisplayName(false).getString();
+  } catch (error) {
+    // Fall back to the species identifier if the display name is unavailable.
+    return String(pokemon.getSpecies().getResourceIdentifier());
+  }
+}
+
+// Resolve a pastured Pokemon UUID through PC storage and prepare an XP award.
+function TryGiveXpToPasturedPokemon(player, pokemonUuid, xpAmount) {
+  // Resolve a fresh Pokemon object across all PC stores associated with the player.
+  let pokemon = FindPokemonInPlayerPcStores(player, pokemonUuid);
+
+  // Stop if this UUID is no longer present in the player's PC storage.
+  if (pokemon == null) {
+    return false;
+  }
+
+  // Stop if the resolved Pokemon is no longer assigned to a Pasture.
+  if (pokemon.getTetheringId() == null) {
+    return false;
+  }
+
+  // Convert the requested amount to a safe integer for the future API call.
+  let safeXpAmount = Math.floor(Number(xpAmount));
+
+  // Stop if the requested amount is invalid or cannot add XP.
+  if (!isFinite(safeXpAmount) || safeXpAmount <= 0) {
+    return false;
+  }
+
+  // XP APPLICATION IS INTENTIONALLY PAUSED FOR THIS TEST.
+  // pokemon.addExperience(TEST_DAYCARE_XP_SOURCE, safeXpAmount);
+
+  // Return false because no XP was actually applied while the line is commented.
+  return false;
+}
+
+// Display the executing player's currently loaded Pasture Pokemon.
+function RunMyPasturedCobblemonsCommand(context) {
+  // Get the player who executed the command.
+  let player = context.source.player;
+
+  // Stop if the command was executed somewhere without a player.
+  if (player == null) {
+    return 0;
+  }
+
+  // Use the executing player's UUID to select only their individual list.
+  let playerKey = String(player.uuid);
+
+  // Get this player's current list of stable Pokemon UUIDs.
+  let pasturedPokemonIds = pasturedPokemonIdsByPlayer.get(playerKey);
+
+  // Explain when no loaded pastured Pokemon belong to this player.
+  if (pasturedPokemonIds == null || pasturedPokemonIds.length === 0) {
+    player.sendSystemMessage(
+      $Component.literal("You have no loaded Pokemon currently on a Pasture."),
+    );
+
+    // Tell Minecraft that the command completed successfully.
+    return 1;
+  }
+
+  // Display every Pokemon UUID belonging to the executing player.
+  for (let index = 0; index < pasturedPokemonIds.length; index++) {
+    // Get the next stable Pokemon UUID from the player's list.
+    let pokemonUuid = pasturedPokemonIds[index];
+
+    // Resolve the current Pokemon object across the player's associated PC stores.
+    let pokemon = FindPokemonInPlayerPcStores(player, pokemonUuid);
+
+    // Ignore a UUID that is no longer present in the player's PC storage.
+    if (pokemon == null) {
+      continue;
+    }
+
+    // Ignore a Pokemon that is no longer assigned to any Pasture.
+    if (pokemon.getTetheringId() == null) {
+      continue;
+    }
+
+    // Read the Pokemon's current name.
+    let pokemonName = GetPasturedPokemonName(pokemon);
+
+    // Read the Pokemon's current level.
+    let pokemonLevel = Number(pokemon.getLevel());
+
+    // Display the requested name-and-level format.
+    player.sendSystemMessage(
+      $Component.literal("[" + pokemonName + "] Lv [" + pokemonLevel + "]"),
+    );
+  }
+
+  // Tell Minecraft that the command completed successfully.
+  return 1;
+}
+
+// Display the current state of every daycare debugger.
+function RunDebuggersStatusCommand(context) {
+  // Get the player who executed the command.
+  let player = context.source.player;
+
+  // Stop if the command was executed somewhere without a player.
+  if (player == null) {
+    return 0;
+  }
+
+  // Get every debugger name declared in the dictionary.
+  let debuggerNames = Object.keys(DEBUGGERS);
+
+  // Visit every debugger so its current value can be displayed.
+  for (let index = 0; index < debuggerNames.length; index++) {
+    // Read the current debugger name.
+    let debuggerName = debuggerNames[index];
+
+    // Read this debugger's persistent boolean value.
+    let enabled = GetSavedDebuggerValue(player.server, debuggerName);
+
+    // Display this debugger's name and current value.
+    player.sendSystemMessage(
+      $Component.literal(debuggerName + ": " + GetDebuggerStatusText(enabled)),
+    );
+  }
+
+  // Tell Minecraft that the command completed successfully.
+  return 1;
+}
+
+// Create the execution function for one named debugger setter.
+function CreateSetDebuggerRunFunction(debuggerName) {
+  // Return a function that remembers the debugger name supplied above.
+  return function (context) {
+    // Get the player who executed the command.
+    let player = context.source.player;
+
+    // Stop if the command was executed somewhere without a player.
+    if (player == null) {
+      return 0;
+    }
+
+    // Read the true or false value supplied after the debugger name.
+    let enabled = $BoolArgumentType.getBool(context, "enabled");
+
+    // Save the selected debugger's new value in persistent server data.
+    SetSavedDebuggerValue(player.server, debuggerName, enabled);
+
+    // Confirm the selected debugger's new value to the player.
+    player.sendSystemMessage(
+      $Component.literal(
+        debuggerName + " is now " + GetDebuggerStatusText(enabled) + ".",
+      ),
+    );
+
+    // Tell Minecraft that the command completed successfully.
+    return 1;
+  };
+}
+
+// Create and return a reusable literal subcommand definition.
+function CreateSubcommand(Commands, subcommandName, runFunction) {
+  // Build the named command node and connect it to its behavior function.
+  return Commands.literal(subcommandName).executes(runFunction);
+}
+
+// Access Minecraft's command builder from the command-registry event.
+ServerEvents.commandRegistry(function (event) {
+  // Store the command builder in a short local variable.
+  let Commands = event.commands;
+
+  // Build the generic set branch below debuggers_status.
+  let setDebuggerCommand = Commands.literal("set");
+
+  // Get every debugger name declared in the dictionary.
+  let debuggerNames = Object.keys(DEBUGGERS);
+
+  // Create one literal command branch for every dictionary entry.
+  for (let index = 0; index < debuggerNames.length; index++) {
+    // Read the debugger name that will appear in command autocomplete.
+    let debuggerName = debuggerNames[index];
+
+    // Attach: set <debugger name> <true or false>.
+    setDebuggerCommand.then(
+      Commands.literal(debuggerName).then(
+        // Require a true or false value named enabled.
+        Commands.argument("enabled", $BoolArgumentType.bool()).executes(
+          CreateSetDebuggerRunFunction(debuggerName),
+        ),
+      ),
+    );
+  }
+
+  // Build the status command and attach the generated setter branches.
+  let debuggersStatusCommand = Commands.literal("debuggers_status")
+    // Display all debugger values when no additional argument is supplied.
+    .executes(RunDebuggersStatusCommand)
+    // Attach the generic set command below debuggers_status.
+    .then(setDebuggerCommand);
+
+  // Register /daycarexp and attach both available subcommands.
+  event.register(
+    Commands.literal("daycarexp")
+      // Attach /daycarexp test through the generic factory.
+      .then(CreateSubcommand(Commands, "test", RunDaycareTestCommand))
+      // Attach /daycarexp mypasturedcobblemons through the generic factory.
+      .then(
+        CreateSubcommand(
+          Commands,
+          "mypasturedcobblemons",
+          RunMyPasturedCobblemonsCommand,
+        ),
+      )
+      // Attach the debugger status and setter command tree.
+      .then(debuggersStatusCommand),
+  );
+});
+

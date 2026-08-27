@@ -1,4 +1,4 @@
-// =============================================================
+/* // =============================================================
 // NOG - COBBLEMON DAYCARE
 // MAIN RUNTIME
 // =============================================================
@@ -49,13 +49,18 @@
   // 5 XP every completed interval
   const XP_PER_INTERVAL = 60;
 
-  // Scan every 5 seconds
-  const SCAN_EVERY_TICKS = 200;
+  const SCAN_EVERY_SECONDS = 10;
+  const SCAN_EVERY_TICKS = Helpers.SecondsToTicks(SCAN_EVERY_SECONDS);
 
   // 3 empty scans = ~15 seconds before sleeping
   const EMPTY_SCANS_BEFORE_SLEEP = 3;
 
   const DAYCARE_XP_SOURCE = new $SidemodExperienceSource("nog_daycare");
+
+  // TEMPORARY MOVEMENT TEST
+  const MSG_INTERVAL_TICKS = Helpers.SecondsToTicks(1);
+  const DISTANCE_REQUIRED_PER_REWARD = 10;
+  const XP_AWARDED = 1;
 
   // =============================================================
   // RUNTIME STATE
@@ -85,6 +90,12 @@
   let daycareStatusSamples = new Map();
 
   let runtimeTick = 0;
+
+  //TEMP
+
+  let movementMessageTickCounter = 0;
+
+  let playerMovementSamples = new Map();
 
   // =============================================================
   // LOCAL LOGGING WRAPPERS
@@ -327,7 +338,7 @@
 
     let oldExperience = Number(pokemon.getExperience());
 
-    pokemon.addExperience(DAYCARE_XP_SOURCE, xpToGive);
+    //pokemon.addExperience(DAYCARE_XP_SOURCE, xpToGive);
 
     let newLevel = Number(pokemon.getLevel());
 
@@ -468,10 +479,88 @@
   }
 
   // =============================================================
+  // TEMPORARY MOVEMENT TEST
+  // =============================================================
+
+  function GetPlayerMovementKey(player) {
+    return String(player.uuid);
+  }
+
+  function SamplePlayerMovement(player) {
+    let playerKey = GetPlayerMovementKey(player);
+
+    let currentX = Number(player.getX());
+    let currentZ = Number(player.getZ());
+
+    let sample = playerMovementSamples.get(playerKey);
+
+    // The first sample only establishes the starting position.
+    if (sample == null) {
+      playerMovementSamples.set(playerKey, {
+        lastX: currentX,
+        lastZ: currentZ,
+        totalMeters: 0,
+      });
+
+      return;
+    }
+
+    let deltaX = currentX - sample.lastX;
+    let deltaZ = currentZ - sample.lastZ;
+
+    let metersWalked = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+
+    sample.totalMeters += metersWalked;
+    sample.lastX = currentX;
+    sample.lastZ = currentZ;
+
+    let xpGained =
+      Math.floor(sample.totalMeters / DISTANCE_REQUIRED_PER_REWARD) *
+      XP_AWARDED;
+
+    SendMessage(
+      player,
+      "Meters walked: " +
+        sample.totalMeters.toFixed(2) +
+        ", XP gained: " +
+        xpGained +
+        ", meters to XP rate: " +
+        DISTANCE_REQUIRED_PER_REWARD +
+        ":" +
+        XP_AWARDED,
+    );
+  }
+
+  function RunMovementMessageTick(server) {
+    movementMessageTickCounter++;
+
+    if (movementMessageTickCounter < MSG_INTERVAL_TICKS) {
+      return;
+    }
+
+    movementMessageTickCounter = 0;
+
+    let players = server.getPlayerList().getPlayers().iterator();
+
+    while (players.hasNext()) {
+      try {
+        SamplePlayerMovement(players.next());
+      } catch (error) {
+        Helpers.LogError(
+          LOG_TAG,
+          "temporary player movement measurement",
+          error,
+        );
+      }
+    }
+  }
+
+  // =============================================================
   // SERVER TICK
   // =============================================================
 
   function RunDaycareTick(event) {
+    RunMovementMessageTick(event.server);
     if (daycareSessions.size > 0) {
       runtimeTick++;
 
@@ -804,3 +893,4 @@
       " seconds.",
   );
 })();
+ */
