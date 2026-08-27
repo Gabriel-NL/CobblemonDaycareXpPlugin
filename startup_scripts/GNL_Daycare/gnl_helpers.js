@@ -1,56 +1,63 @@
-/* // =============================================================
-// GNL - GENERIC HELPERS LIBRARY
-// =============================================================
-
-// Root namespace
+// Shared helpers that do not depend on Cobblemon.
 global.Nog = global.Nog || {};
-
-// Generic helpers namespace
 global.Nog.Helpers = global.Nog.Helpers || {};
 
-// =============================================================
-// FUNCTIONS
-// =============================================================
-
-function Debug(DEBUG_param, TAG, message) {
-  if (!DEBUG_param) {
-    return;
+(function (Helpers) {
+  function LogError(tag, context, error) {
+    console.error("[" + tag + "] " + context + ": " + String(error));
+    try {
+      if (error != null && error.stack != null) console.error(String(error.stack));
+    } catch (_) {}
   }
 
-  console.info("[" + TAG + "] " + message);
-}
+  function SecondsToTicks(seconds) {
+    return Math.floor(Number(seconds) * 20);
+  }
 
-function LogError(tag, context, error) {
-  console.error("============================================================");
+  function PersistentKey(prefix, name) {
+    return String(prefix) + String(name);
+  }
 
-  console.error("[" + tag + "] ERROR");
+  function GetPersistentValue(server, definitions, prefix, name) {
+    let definition = definitions[name];
+    if (definition == null) return null;
+    let data = server.persistentData;
+    let key = PersistentKey(prefix, name);
 
-  console.error("[" + tag + "] Context: " + context);
-
-  console.error("[" + tag + "] Error: " + String(error));
-
-  try {
-    if (error != null && error.stack != null) {
-      console.error("[" + tag + "] Stack:\n" + String(error.stack));
+    if (!data.contains(key) && definition.legacyName != null) {
+      let legacyKey = PersistentKey(prefix, definition.legacyName);
+      if (data.contains(legacyKey)) data.putInt(key, data.getInt(legacyKey));
     }
-  } catch (_) {}
-
-  try {
-    if (error != null && error.javaException != null) {
-      console.error(
-        "[" + tag + "] Java exception: " + String(error.javaException),
-      );
+    if (!data.contains(key)) {
+      if (definition.type === "boolean") data.putBoolean(key, definition.defaultValue);
+      else data.putInt(key, definition.defaultValue);
     }
-  } catch (_) {}
+    if (definition.type === "boolean") return data.getBoolean(key);
 
-  console.error("============================================================");
-}
+    let value = Number(data.getInt(key));
+    if (!isFinite(value) || value < definition.minimum) {
+      value = definition.defaultValue;
+      data.putInt(key, value);
+    }
+    return Math.floor(value);
+  }
 
-function SecondsToTicks(seconds) {
-  return Math.floor(Number(seconds) * 20);
-}
+  function SetPersistentValue(server, definitions, prefix, name, value) {
+    let definition = definitions[name];
+    if (definition == null) return false;
+    let key = PersistentKey(prefix, name);
+    if (definition.type === "boolean") {
+      server.persistentData.putBoolean(key, Boolean(value));
+      return true;
+    }
+    let integerValue = Math.floor(Number(value));
+    if (!isFinite(integerValue) || integerValue < definition.minimum) return false;
+    server.persistentData.putInt(key, integerValue);
+    return true;
+  }
 
-global.Nog.Helpers.Debug = Debug;
-global.Nog.Helpers.LogError = LogError;
-global.Nog.Helpers.SecondsToTicks = SecondsToTicks;
- */
+  Helpers.LogError = LogError;
+  Helpers.SecondsToTicks = SecondsToTicks;
+  Helpers.GetPersistentValue = GetPersistentValue;
+  Helpers.SetPersistentValue = SetPersistentValue;
+})(global.Nog.Helpers);
