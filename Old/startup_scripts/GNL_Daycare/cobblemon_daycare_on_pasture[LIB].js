@@ -1,4 +1,4 @@
-// Core session logic for the Pasture daycare. This file never registers events.
+// Core Pasture daycare behavior. This file does not register events or commands.
 global.Nog = global.Nog || {};
 global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
 
@@ -7,14 +7,20 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     return String(player.uuid);
   }
 
+  function PokemonIdSignature(ids) {
+    let values = [];
+    for (let index = 0; index < ids.length; index++) values.push(String(ids[index]));
+    return values.join("|");
+  }
+
   function RefreshPasturedPokemonIds(player, state) {
     let ids = [];
     let seen = new Set();
     let stores = global.Nog.Cobblemon.GetPlayerPcStores(player);
     for (let storeIndex = 0; storeIndex < stores.length; storeIndex++) {
-      let pokemonIterator = stores[storeIndex].iterator();
-      while (pokemonIterator.hasNext()) {
-        let pokemon = pokemonIterator.next();
+      let iterator = stores[storeIndex].iterator();
+      while (iterator.hasNext()) {
+        let pokemon = iterator.next();
         let uuidKey = String(pokemon.getUuid());
         if (global.Nog.Cobblemon.IsTethered(pokemon) && !seen.has(uuidKey)) {
           seen.add(uuidKey);
@@ -24,6 +30,14 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     }
     state.pasturedPokemonIdsByPlayer.set(PlayerKey(player), ids);
     return ids;
+  }
+
+  function DeactivateTracker(player, state, notification) {
+    let playerKey = PlayerKey(player);
+    if (!state.trackedPokemonByPlayer.has(playerKey)) return false;
+    state.trackedPokemonByPlayer.delete(playerKey);
+    if (notification != null) global.Nog.Helpers.Tell(player, notification);
+    return true;
   }
 
   function UnsubscribePlayer(playerKey, state) {
@@ -39,21 +53,27 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     let playerKey = PlayerKey(player);
     UnsubscribePlayer(playerKey, state);
     RefreshPasturedPokemonIds(player, state);
-
     let stores = global.Nog.Cobblemon.GetPlayerPcStores(player);
     let subscriptions = [];
     for (let index = 0; index < stores.length; index++) {
       subscriptions.push(stores[index].getPcChangeObservable().subscribe(function () {
         state.sleepingPlayers.delete(playerKey);
-        RefreshPasturedPokemonIds(player, state);
+        let refreshedIds = RefreshPasturedPokemonIds(player, state);
+        let tracker = state.trackedPokemonByPlayer.get(playerKey);
+        if (tracker != null && PokemonIdSignature(refreshedIds) !== tracker.listSignature) {
+          DeactivateTracker(
+            player,
+            state,
+            "Pastured Pokemon list changed. Deactivating tracker.",
+          );
+        }
       }));
     }
     state.pcChangeSubscriptions.set(playerKey, subscriptions);
   }
 
   function GetStats(player, state) {
-    let playerKey = PlayerKey(player);
-    let ids = state.pasturedPokemonIdsByPlayer.get(playerKey) || [];
+    let ids = state.pasturedPokemonIdsByPlayer.get(PlayerKey(player)) || [];
     let cap = global.Nog.Cobblemon.GetPlayerLevelCap(player);
     let stats = {
       eligiblePokemonCount: 0,
@@ -64,7 +84,6 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
       cappedPokemonIds: [],
     };
     let seen = new Set();
-
     for (let index = 0; index < ids.length; index++) {
       let uuidKey = String(ids[index]);
       if (seen.has(uuidKey)) continue;
@@ -103,7 +122,6 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     let xpPerPokemon = count > 0 ? Math.floor(totalXp / count) : 0;
     return {
       xpPerPokemon: xpPerPokemon,
-      distributableXp: xpPerPokemon * count,
       preservedXp: totalXp - xpPerPokemon * count,
     };
   }
@@ -124,7 +142,6 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     if (!isFinite(safeRequest) || safeRequest <= 0) {
       return { acceptedXp: 0, capped: false, blocked: true };
     }
-
     let cap = global.Nog.Cobblemon.GetPlayerLevelCap(player);
     if (Number(pokemon.getLevel()) >= cap) {
       return { acceptedXp: 0, capped: true, blocked: false };
@@ -142,12 +159,18 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
 
     if (notificationsEnabled && newLevel > oldLevel) {
       for (let level = oldLevel + 1; level <= newLevel; level++) {
-        player.tell(global.Nog.Cobblemon.GetPokemonName(pokemon) + " reached level " + level + ".");
+        global.Nog.Helpers.Tell(
+          player,
+          global.Nog.Cobblemon.GetPokemonName(pokemon) + " reached level " + level + ".",
+        );
       }
     }
     if (notificationsEnabled && reachedCap) {
-      player.tell(global.Nog.Cobblemon.GetPokemonName(pokemon) +
-        " reached your current level cap (" + newLevel + ").");
+      global.Nog.Helpers.Tell(
+        player,
+        global.Nog.Cobblemon.GetPokemonName(pokemon) +
+          " reached your current level cap (" + newLevel + ").",
+      );
     }
     return {
       acceptedXp: acceptedXp,
@@ -169,7 +192,6 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     }
     eligibleIds.sort(function (a, b) { return String(a).localeCompare(String(b)); });
     let totalAccepted = 0;
-
     while (eligibleIds.length > 0) {
       let cachedXp = Number(state.pendingXpByPlayer.get(playerKey) || 0);
       let equalShare = Math.floor(cachedXp / eligibleIds.length);
@@ -194,7 +216,99 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     return totalAccepted;
   }
 
-  function CleanupPlayer(playerKey, state) {
+  function GetXpProgress(pokemon) {
+    let level = Number(pokemon.getLevel());
+    let experience = Number(pokemon.getExperience());
+    let totalForNextLevel = experience;
+    try { totalForNextLevel += Number(pokemon.getExperienceToLevel(level + 1)); }
+    catch (_) {}
+    return { experience: experience, totalForNextLevel: totalForNextLevel, level: level };
+  }
+
+  function FormatXpProgress(progress) {
+    return progress.experience + "/" + progress.totalForNextLevel + " XP Lv " + progress.level;
+  }
+
+  function CheckTrackerAgainstLocalList(player, state) {
+    let tracker = state.trackedPokemonByPlayer.get(PlayerKey(player));
+    if (tracker == null) return;
+    let ids = state.pasturedPokemonIdsByPlayer.get(PlayerKey(player)) || [];
+    if (PokemonIdSignature(ids) !== tracker.listSignature) {
+      DeactivateTracker(player, state, "Pastured Pokemon list changed. Deactivating tracker.");
+    }
+  }
+
+  function HandlePlayerInterval(player, server, runtime) {
+    let state = runtime.state;
+    let playerKey = PlayerKey(player);
+    let currentPosition = { x: Number(player.getX()), z: Number(player.getZ()) };
+    state.currentPositions.set(playerKey, currentPosition);
+    let lastPosition = state.lastPositions.get(playerKey);
+    let distance = 0;
+    if (lastPosition != null) {
+      let deltaX = currentPosition.x - lastPosition.x;
+      let deltaZ = currentPosition.z - lastPosition.z;
+      distance = Math.sqrt(deltaX * deltaX + deltaZ * deltaZ);
+    }
+    state.lastPositions.set(playerKey, currentPosition);
+    if (state.sleepingPlayers.has(playerKey)) return;
+
+    let stats = GetStats(player, state);
+    let generatedXp = 0;
+    if (stats.eligiblePokemonCount > 0) {
+      generatedXp = GeneratePendingXp(
+        state,
+        playerKey,
+        distance,
+        runtime.getVariable(server, "blocks_per_milestone"),
+        runtime.getVariable(server, "xp_per_milestone"),
+      );
+    }
+
+    let tracker = state.trackedPokemonByPlayer.get(playerKey);
+    let trackedExperienceBefore = null;
+    if (tracker != null) {
+      let tracked = global.Nog.Cobblemon.FindPokemonInPlayerPcStores(player, tracker.pokemonUuid);
+      if (tracked != null) trackedExperienceBefore = Number(tracked.getExperience());
+    }
+    let appliedXp = ApplyPendingXp(
+      player,
+      state,
+      runtime.xpSource,
+      runtime.getVariable(server, "levelUpNotification"),
+    );
+    CheckTrackerAgainstLocalList(player, state);
+
+    tracker = state.trackedPokemonByPlayer.get(playerKey);
+    if (tracker != null && trackedExperienceBefore != null) {
+      let tracked = global.Nog.Cobblemon.FindPokemonInPlayerPcStores(player, tracker.pokemonUuid);
+      if (tracked != null && Number(tracked.getExperience()) > trackedExperienceBefore) {
+        global.Nog.Helpers.Tell(player, global.Nog.Cobblemon.GetPokemonName(tracked) + " XP tracker:");
+        global.Nog.Helpers.Tell(player, "Before: " + FormatXpProgress(tracker.startingProgress));
+        global.Nog.Helpers.Tell(player, "Current: " + FormatXpProgress(GetXpProgress(tracked)));
+      }
+    }
+
+    stats = GetStats(player, state);
+    let pendingXp = Number(state.pendingXpByPlayer.get(playerKey) || 0);
+    let plan = PlanDistribution(stats.eligiblePokemonIds, pendingXp);
+    if (runtime.getDebugger(server, "walk")) {
+      global.Nog.Helpers.Tell(
+        player,
+        "Distance since last position: " + distance.toFixed(1).replace(".", ",") +
+          " | XP generated: " + generatedXp + " | XP applied: " + appliedXp +
+          " | Hypothetical XP: " + pendingXp + " | XP per Pokemon: " + plan.xpPerPokemon +
+          " | XP preserved for next batch: " + plan.preservedXp +
+          " | Total pastured Pokemon: " + stats.totalPokemonCount +
+          " | Current player cap: " + stats.currentLevelCap +
+          " | Level-capped ignored: " + stats.cappedPokemonCount,
+      );
+    }
+  }
+
+  function CleanupPlayer(player, state) {
+    let playerKey = PlayerKey(player);
+    DeactivateTracker(player, state, null);
     UnsubscribePlayer(playerKey, state);
     state.lastPositions.delete(playerKey);
     state.currentPositions.delete(playerKey);
@@ -215,15 +329,16 @@ global.Nog.CobblemonDaycare = global.Nog.CobblemonDaycare || {};
     state.pendingXpByPlayer.clear();
     state.pasturedPokemonIdsByPlayer.clear();
     state.sleepingPlayers.clear();
+    state.trackedPokemonByPlayer.clear();
   }
 
   Daycare.PlayerKey = PlayerKey;
-  Daycare.RefreshPasturedPokemonIds = RefreshPasturedPokemonIds;
+  Daycare.PokemonIdSignature = PokemonIdSignature;
+  Daycare.DeactivateTracker = DeactivateTracker;
+  Daycare.GetXpProgress = GetXpProgress;
+  Daycare.FormatXpProgress = FormatXpProgress;
   Daycare.SubscribePlayer = SubscribePlayer;
-  Daycare.GetStats = GetStats;
-  Daycare.GeneratePendingXp = GeneratePendingXp;
-  Daycare.PlanDistribution = PlanDistribution;
-  Daycare.ApplyPendingXp = ApplyPendingXp;
+  Daycare.HandlePlayerInterval = HandlePlayerInterval;
   Daycare.CleanupPlayer = CleanupPlayer;
   Daycare.CleanupAll = CleanupAll;
 })(global.Nog.CobblemonDaycare);

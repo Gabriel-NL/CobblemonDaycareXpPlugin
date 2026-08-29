@@ -3,6 +3,12 @@ global.Nog = global.Nog || {};
 global.Nog.Helpers = global.Nog.Helpers || {};
 
 (function (Helpers) {
+  const $Component = Java.loadClass("net.minecraft.network.chat.Component");
+
+  function Tell(player, message) {
+    player.sendSystemMessage($Component.literal(String(message)));
+  }
+
   function LogError(tag, context, error) {
     console.error("[" + tag + "] " + context + ": " + String(error));
     try {
@@ -57,6 +63,7 @@ global.Nog.Helpers = global.Nog.Helpers || {};
   }
 
   Helpers.LogError = LogError;
+  Helpers.Tell = Tell;
   Helpers.SecondsToTicks = SecondsToTicks;
   Helpers.GetPersistentValue = GetPersistentValue;
   Helpers.SetPersistentValue = SetPersistentValue;
