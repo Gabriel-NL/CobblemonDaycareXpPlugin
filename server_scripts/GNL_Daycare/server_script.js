@@ -31,6 +31,10 @@
     "com.cobblemon.mod.common.api.pokemon.experience.SidemodExperienceSource",
   );
 
+  const $BattleRegistry = Java.loadClass(
+    "com.cobblemon.mod.common.battles.BattleRegistry",
+  );
+
   // =============================================================
   // CONSTANT CONFIGURATION
   // =============================================================
@@ -283,6 +287,13 @@
     );
 
     return true;
+  }
+
+  // Return true when the player is participating in a Cobblemon battle.
+  function IsPlayerInBattle(player) {
+    let currentBattle = $BattleRegistry.getBattleByParticipatingPlayer(player);
+
+    return currentBattle != null;
   }
 
   // =============================================================
@@ -1308,32 +1319,56 @@
   function ProcessDaycareInterval(server, player) {
     let playerKey = GetPlayerKey(player);
 
-    // Always update the movement baseline, including while processing is paused.
+    // Always update the movement baseline, including while XP
+    // processing is paused or the player is battling.
     let measuredDistance = MeasurePlayerDistance(player);
+
+    // Avoid repeated eligibility scans while this player is waiting
+    // for a PC change.
     if (DAYCARE_SESSION.playersWithPausedXpProcessing.has(playerKey)) {
       return;
     }
 
+    // Find the player's currently eligible pastured Pokemon.
     let stats = GetPasturedPokemonStats(player);
+
+    // Pause processing if nobody can currently receive XP.
     if (stats.eligiblePokemonCount === 0) {
       DAYCARE_SESSION.playersWithPausedXpProcessing.add(playerKey);
+
       return;
     }
 
+    // Convert this interval's movement into pending XP.
+    //
+    // This still happens while the player is in battle.
     let generatedXp = GeneratePendingXpFromDistance(
       server,
       playerKey,
       measuredDistance,
     );
 
-    // Snapshot the tracked Pokemon immediately before this interval's awards.
+    // Do not apply or decrement pending daycare XP while the player
+    // is participating in a Cobblemon battle.
+    //
+    // The generated XP remains stored in pendingXpByPlayer and will
+    // be considered again during the next interval.
+    if (IsPlayerInBattle(player)) {
+      return;
+    }
+
+    // Snapshot the tracked Pokemon immediately before this
+    // interval's XP distribution.
     let tracker = DAYCARE_SESSION.trackedPokemonByPlayer.get(playerKey);
+
     let trackedExperienceBeforeDistribution = null;
+
     if (tracker != null) {
       let trackedPokemon = FindPokemonInPlayerPcStores(
         player,
         tracker.pokemonUuid,
       );
+
       if (trackedPokemon != null) {
         trackedExperienceBeforeDistribution = Number(
           trackedPokemon.getExperience(),
@@ -1341,20 +1376,34 @@
       }
     }
 
+    // Apply complete equal integer batches and remove only XP that
+    // Cobblemon confirms was accepted.
     let appliedXp = DistributePendingXp(server, player);
+
+    // Display tracker progress only if the tracked Pokemon received
+    // XP during this distribution.
     UpdatePokemonXpTracker(player, trackedExperienceBeforeDistribution);
 
+    // Refresh the statistics because some Pokemon may have reached
+    // the player's level cap during distribution.
     stats = GetPasturedPokemonStats(player);
+
+    // Read the XP that remains undistributed.
     let pendingXp = Number(
       DAYCARE_SESSION.pendingXpByPlayer.get(playerKey) || 0,
     );
+
+    // Preview the equal integer amount each currently eligible
+    // Pokemon could receive.
     let xpPerPokemon =
       stats.eligiblePokemonCount > 0
         ? Math.floor(pendingXp / stats.eligiblePokemonCount)
         : 0;
-    let preservedXp =
-      pendingXp - xpPerPokemon * stats.eligiblePokemonCount;
 
+    // Calculate the XP that cannot currently be divided equally.
+    let preservedXp = pendingXp - xpPerPokemon * stats.eligiblePokemonCount;
+
+    // Display interval details only when the walk debugger is active.
     DisplayWalkDebugger(server, player, {
       measuredDistance: measuredDistance,
       generatedXp: generatedXp,
@@ -1686,8 +1735,9 @@
       .executes(RunDebuggerStatusCommand)
       .then(debuggerSetCommand);
 
-    let variablesCommand =
-      Commands.literal("variables").executes(RunAllVariablesCommand);
+    let variablesCommand = Commands.literal("variables").executes(
+      RunAllVariablesCommand,
+    );
     let variableNames = Object.keys(DAYCARE_VARIABLES);
     for (let index = 0; index < variableNames.length; index++) {
       let variableName = variableNames[index];
