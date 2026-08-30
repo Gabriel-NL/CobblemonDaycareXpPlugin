@@ -1149,23 +1149,115 @@
 
   // Format an XP-progress object for a chat message.
   function FormatPokemonXpProgress(progress) {
-    // TODO
+    return (
+      progress.experience +
+      "/" +
+      progress.totalForNextLevel +
+      " XP Lv " +
+      progress.level
+    );
   }
 
   // Start tracking the Pokemon at a particular temporary-list index.
   function StartPokemonXpTracker(player, listIndex) {
-    // TODO
+    let playerKey = GetPlayerKey(player);
+    let safeListIndex = Math.floor(Number(listIndex));
+    let pasturedPokemonIds =
+      DAYCARE_SESSION.pasturedPokemonIdsByPlayer.get(playerKey) || [];
+
+    // Command indexes are one-based, while JavaScript arrays are zero-based.
+    let arrayIndex = safeListIndex - 1;
+    if (
+      !isFinite(safeListIndex) ||
+      arrayIndex < 0 ||
+      arrayIndex >= pasturedPokemonIds.length
+    ) {
+      Tell(
+        player,
+        "Invalid Pasture list index. Current list size: " +
+          pasturedPokemonIds.length +
+          ".",
+      );
+      return false;
+    }
+
+    let pokemonUuid = pasturedPokemonIds[arrayIndex];
+    let pokemon = FindPokemonInPlayerPcStores(player, pokemonUuid);
+    if (pokemon == null || pokemon.getTetheringId() == null) {
+      Tell(player, "That Pasture list entry is no longer available.");
+      return false;
+    }
+
+    // Replace an existing tracker without displaying a deactivation message.
+    DeactivatePokemonXpTracker(player, null);
+
+    let startingProgress = GetPokemonXpProgress(pokemon);
+    DAYCARE_SESSION.trackedPokemonByPlayer.set(playerKey, {
+      pokemonUuid: pokemonUuid,
+      listSignature: CreatePasturedListSignature(pasturedPokemonIds),
+      startingProgress: startingProgress,
+    });
+
+    Tell(
+      player,
+      "Tracking [" +
+        pokemon.getDisplayName(false).getString() +
+        "] at Pasture list index " +
+        safeListIndex +
+        ".",
+    );
+    Tell(player, "Before: " + FormatPokemonXpProgress(startingProgress));
+    return true;
   }
 
   // Deactivate the current tracker belonging to one player.
   function DeactivatePokemonXpTracker(player, notificationMessage) {
-    // TODO
+    let playerKey = GetPlayerKey(player);
+    let trackerWasActive =
+      DAYCARE_SESSION.trackedPokemonByPlayer.has(playerKey);
+
+    if (!trackerWasActive) {
+      return false;
+    }
+
+    DAYCARE_SESSION.trackedPokemonByPlayer.delete(playerKey);
+
+    if (notificationMessage != null) {
+      Tell(player, notificationMessage);
+    }
+
+    return true;
   }
 
   // Display tracker progress when the tracked Pokemon receives
   // daycare XP.
   function UpdatePokemonXpTracker(player, experienceBeforeDistribution) {
-    // TODO
+    let playerKey = GetPlayerKey(player);
+    let tracker = DAYCARE_SESSION.trackedPokemonByPlayer.get(playerKey);
+    if (tracker == null || experienceBeforeDistribution == null) {
+      return false;
+    }
+
+    let pokemon = FindPokemonInPlayerPcStores(player, tracker.pokemonUuid);
+    if (pokemon == null) {
+      return false;
+    }
+
+    let currentExperience = Number(pokemon.getExperience());
+    if (currentExperience <= Number(experienceBeforeDistribution)) {
+      return false;
+    }
+
+    Tell(player, pokemon.getDisplayName(false).getString() + " XP tracker:");
+    Tell(
+      player,
+      "Before: " + FormatPokemonXpProgress(tracker.startingProgress),
+    );
+    Tell(
+      player,
+      "Current: " + FormatPokemonXpProgress(GetPokemonXpProgress(pokemon)),
+    );
+    return true;
   }
 
   // -------------------------------------------------------------
@@ -1174,7 +1266,35 @@
 
   // Display the walking and XP-distribution debugger message.
   function DisplayWalkDebugger(server, player, intervalResult) {
-    // TODO
+    if (!GetDebuggerValue(server, "walk")) {
+      return;
+    }
+
+    let formattedDistance = intervalResult.measuredDistance
+      .toFixed(1)
+      .replace(".", ",");
+
+    Tell(
+      player,
+      "Distance since last position: " +
+        formattedDistance +
+        " | XP generated: " +
+        intervalResult.generatedXp +
+        " | XP applied: " +
+        intervalResult.appliedXp +
+        " | Pending XP: " +
+        intervalResult.pendingXp +
+        " | XP per Pokemon: " +
+        intervalResult.xpPerPokemon +
+        " | XP preserved for next batch: " +
+        intervalResult.preservedXp +
+        " | Total pastured Pokemon: " +
+        intervalResult.stats.totalPokemonCount +
+        " | Current player cap: " +
+        intervalResult.stats.currentLevelCap +
+        " | Level-capped ignored: " +
+        intervalResult.stats.cappedPokemonCount,
+    );
   }
 
   // -------------------------------------------------------------
@@ -1186,16 +1306,64 @@
   // This is the function called by ServerEvents.tick after the
   // configured interval has passed.
   function ProcessDaycareInterval(server, player) {
-    // TODO:
-    //
-    // 1. Measure the player's movement.
-    // 2. Stop early if XP processing is paused.
-    // 3. Resolve eligible pastured Pokemon.
-    // 4. Convert completed distance milestones into pending XP.
-    // 5. Record the tracked Pokemon's experience before distribution.
-    // 6. Distribute complete equal XP batches.
-    // 7. Update the temporary XP tracker.
-    // 8. Display debugger information when enabled.
+    let playerKey = GetPlayerKey(player);
+
+    // Always update the movement baseline, including while processing is paused.
+    let measuredDistance = MeasurePlayerDistance(player);
+    if (DAYCARE_SESSION.playersWithPausedXpProcessing.has(playerKey)) {
+      return;
+    }
+
+    let stats = GetPasturedPokemonStats(player);
+    if (stats.eligiblePokemonCount === 0) {
+      DAYCARE_SESSION.playersWithPausedXpProcessing.add(playerKey);
+      return;
+    }
+
+    let generatedXp = GeneratePendingXpFromDistance(
+      server,
+      playerKey,
+      measuredDistance,
+    );
+
+    // Snapshot the tracked Pokemon immediately before this interval's awards.
+    let tracker = DAYCARE_SESSION.trackedPokemonByPlayer.get(playerKey);
+    let trackedExperienceBeforeDistribution = null;
+    if (tracker != null) {
+      let trackedPokemon = FindPokemonInPlayerPcStores(
+        player,
+        tracker.pokemonUuid,
+      );
+      if (trackedPokemon != null) {
+        trackedExperienceBeforeDistribution = Number(
+          trackedPokemon.getExperience(),
+        );
+      }
+    }
+
+    let appliedXp = DistributePendingXp(server, player);
+    UpdatePokemonXpTracker(player, trackedExperienceBeforeDistribution);
+
+    stats = GetPasturedPokemonStats(player);
+    let pendingXp = Number(
+      DAYCARE_SESSION.pendingXpByPlayer.get(playerKey) || 0,
+    );
+    let xpPerPokemon =
+      stats.eligiblePokemonCount > 0
+        ? Math.floor(pendingXp / stats.eligiblePokemonCount)
+        : 0;
+    let preservedXp =
+      pendingXp - xpPerPokemon * stats.eligiblePokemonCount;
+
+    DisplayWalkDebugger(server, player, {
+      measuredDistance: measuredDistance,
+      generatedXp: generatedXp,
+      appliedXp: appliedXp,
+      pendingXp: pendingXp,
+      xpPerPokemon: xpPerPokemon,
+      preservedXp: preservedXp,
+      stats: stats,
+    });
   }
 
   // =============================================================
@@ -1229,9 +1397,7 @@
 
     while (players.hasNext()) {
       let player = players.next();
-
-      // We will implement this function in the PC/Pasture section.
-      //SubscribePlayerToPcChanges(player);
+      SubscribePlayerToPcChanges(player);
     }
   });
 
@@ -1343,45 +1509,14 @@
       // - Find eligible pastured Pokemon.
       // - Distribute pending XP.
       // - Produce debugger/tracker messages.
-      ProcessDaycareInterval(event.server, player);
+      try {
+        ProcessDaycareInterval(event.server, player);
+      } catch (error) {
+        console.error(
+          "[" + LOG_TAG + "] Player interval failed: " + String(error),
+        );
+      }
     }
-  });
-  // =============================================================
-  // BLOCK EVENTS
-  // =============================================================
-
-  BlockEvents.placed(function (event) {
-    let player = event.player;
-
-    if (player == null) {
-      return;
-    }
-
-    // Example filter:
-    if (String(event.block.id) !== "minecraft:diamond_block") {
-      return;
-    }
-
-    Tell(player, "You placed a diamond block.");
-  });
-
-  BlockEvents.broken(function (event) {
-    // event.block contains the broken block.
-    // event.player contains the player when one caused the event.
-  });
-
-  BlockEvents.rightClicked(function (event) {
-    // event.block contains the clicked block.
-    // event.item contains the item used for the interaction.
-  });
-
-  // =============================================================
-  // ENTITY EVENTS
-  // =============================================================
-
-  EntityEvents.spawned(function (event) {
-    // event.entity contains the entity that entered the level.
-    // Check its type before using methods belonging to a specific entity class.
   });
 
   // =============================================================
@@ -1391,42 +1526,210 @@
   ServerEvents.commandRegistry(function (event) {
     let Commands = event.commands;
 
-    event.register(
-      Commands.literal("myscript")
-        .executes(function (context) {
-          let player = context.source.player;
+    function RequirePlayer(context) {
+      return context.source.player;
+    }
 
-          if (player == null) {
-            return 0;
-          }
+    function RunTestCommand(context) {
+      let player = RequirePlayer(context);
+      if (player == null) return 0;
+      Tell(player, "Hi! This is my script!");
+      return 1;
+    }
 
-          Tell(player, "My script is running!");
-          return 1;
-        })
-        .then(
-          Commands.literal("set_number").then(
-            Commands.argument(
-              "value",
-              $IntegerArgumentType.integer(0),
-            ).executes(function (context) {
-              let player = context.source.player;
+    function RunPasturedPokemonListCommand(context) {
+      let player = RequirePlayer(context);
+      if (player == null) return 0;
+      let playerKey = GetPlayerKey(player);
+      let pokemonIds =
+        DAYCARE_SESSION.pasturedPokemonIdsByPlayer.get(playerKey) || [];
 
-              if (player == null) {
-                return 0;
-              }
+      if (pokemonIds.length === 0) {
+        Tell(player, "You have no Pokemon currently on a Pasture.");
+        return 1;
+      }
 
-              let value = $IntegerArgumentType.getInteger(context, "value");
+      let displayedPokemon = 0;
+      for (let index = 0; index < pokemonIds.length; index++) {
+        let pokemon = FindPokemonInPlayerPcStores(player, pokemonIds[index]);
+        if (pokemon == null || pokemon.getTetheringId() == null) continue;
+        Tell(
+          player,
+          index +
+            1 +
+            ": [" +
+            pokemon.getDisplayName(false).getString() +
+            "] Lv [" +
+            Number(pokemon.getLevel()) +
+            "]",
+        );
+        displayedPokemon++;
+      }
 
-              if (!SetSavedNumber(player.server, value)) {
-                Tell(player, "Invalid value.");
-                return 0;
-              }
+      if (displayedPokemon === 0) {
+        Tell(player, "You have no Pokemon currently on a Pasture.");
+      }
+      return 1;
+    }
 
-              Tell(player, "Saved number: " + GetSavedNumber(player.server));
-              return 1;
-            }),
+    function RunTrackCommand(context) {
+      let player = RequirePlayer(context);
+      if (player == null) return 0;
+      let listIndex = $IntegerArgumentType.getInteger(context, "index");
+      let enabled = $BoolArgumentType.getBool(context, "enabled");
+
+      if (!enabled) {
+        let deactivated = DeactivatePokemonXpTracker(player, null);
+        Tell(
+          player,
+          deactivated
+            ? "Pokemon tracker disabled."
+            : "No Pokemon tracker was active.",
+        );
+        return 1;
+      }
+
+      return StartPokemonXpTracker(player, listIndex) ? 1 : 0;
+    }
+
+    function RunDebuggerStatusCommand(context) {
+      let player = RequirePlayer(context);
+      if (player == null) return 0;
+      let debuggerNames = Object.keys(DEBUGGERS);
+      for (let index = 0; index < debuggerNames.length; index++) {
+        let debuggerName = debuggerNames[index];
+        let enabled = GetDebuggerValue(player.server, debuggerName);
+        Tell(
+          player,
+          debuggerName +
+            ": " +
+            (enabled ? "active (true)" : "inactive (false)"),
+        );
+      }
+      return 1;
+    }
+
+    function CreateSetDebuggerCommand(debuggerName) {
+      return function (context) {
+        let player = RequirePlayer(context);
+        if (player == null) return 0;
+        let enabled = $BoolArgumentType.getBool(context, "enabled");
+        SetDebuggerValue(player.server, debuggerName, enabled);
+        Tell(
+          player,
+          debuggerName +
+            " is now " +
+            (enabled ? "active (true)." : "inactive (false)."),
+        );
+        return 1;
+      };
+    }
+
+    function SendVariableValue(player, variableName) {
+      Tell(
+        player,
+        variableName + ": " + GetDaycareVariable(player.server, variableName),
+      );
+    }
+
+    function RunAllVariablesCommand(context) {
+      let player = RequirePlayer(context);
+      if (player == null) return 0;
+      let variableNames = Object.keys(DAYCARE_VARIABLES);
+      for (let index = 0; index < variableNames.length; index++) {
+        SendVariableValue(player, variableNames[index]);
+      }
+      return 1;
+    }
+
+    function CreateShowVariableCommand(variableName) {
+      return function (context) {
+        let player = RequirePlayer(context);
+        if (player == null) return 0;
+        SendVariableValue(player, variableName);
+        return 1;
+      };
+    }
+
+    function CreateSetVariableCommand(variableName) {
+      return function (context) {
+        let player = RequirePlayer(context);
+        if (player == null) return 0;
+        let definition = DAYCARE_VARIABLES[variableName];
+        let newValue =
+          definition.type === "boolean"
+            ? $BoolArgumentType.getBool(context, "value")
+            : $IntegerArgumentType.getInteger(context, "value");
+
+        if (!SetDaycareVariable(player.server, variableName, newValue)) {
+          Tell(player, "Invalid value for " + variableName + ".");
+          return 0;
+        }
+        SendVariableValue(player, variableName);
+        return 1;
+      };
+    }
+
+    let debuggerSetCommand = Commands.literal("set");
+    let debuggerNames = Object.keys(DEBUGGERS);
+    for (let index = 0; index < debuggerNames.length; index++) {
+      let debuggerName = debuggerNames[index];
+      debuggerSetCommand.then(
+        Commands.literal(debuggerName).then(
+          Commands.argument("enabled", $BoolArgumentType.bool()).executes(
+            CreateSetDebuggerCommand(debuggerName),
           ),
         ),
+      );
+    }
+    let debuggerCommand = Commands.literal("debuggers_status")
+      .executes(RunDebuggerStatusCommand)
+      .then(debuggerSetCommand);
+
+    let variablesCommand =
+      Commands.literal("variables").executes(RunAllVariablesCommand);
+    let variableNames = Object.keys(DAYCARE_VARIABLES);
+    for (let index = 0; index < variableNames.length; index++) {
+      let variableName = variableNames[index];
+      let definition = DAYCARE_VARIABLES[variableName];
+      let valueArgument =
+        definition.type === "boolean"
+          ? Commands.argument("value", $BoolArgumentType.bool())
+          : Commands.argument(
+              "value",
+              $IntegerArgumentType.integer(definition.minimum),
+            );
+
+      variablesCommand.then(
+        Commands.literal(variableName)
+          .executes(CreateShowVariableCommand(variableName))
+          .then(
+            Commands.literal("set").then(
+              valueArgument.executes(CreateSetVariableCommand(variableName)),
+            ),
+          ),
+      );
+    }
+
+    event.register(
+      Commands.literal("daycarexp")
+        .then(Commands.literal("test").executes(RunTestCommand))
+        .then(
+          Commands.literal("track").then(
+            Commands.argument("index", $IntegerArgumentType.integer(1)).then(
+              Commands.argument("enabled", $BoolArgumentType.bool()).executes(
+                RunTrackCommand,
+              ),
+            ),
+          ),
+        )
+        .then(
+          Commands.literal("mypasturedcobblemons").executes(
+            RunPasturedPokemonListCommand,
+          ),
+        )
+        .then(debuggerCommand)
+        .then(variablesCommand),
     );
   });
 })();
